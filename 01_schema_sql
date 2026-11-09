@@ -1,0 +1,1041 @@
+CREATE DATABASE IF NOT EXISTS crownfield_eye_hospital; -- 01_schema.sql file.
+
+USE crownfield_eye_hospital;
+
+
+CREATE TABLE patient (
+    patient_id VARCHAR(10) PRIMARY KEY,
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL,
+    postcode VARCHAR(10) NOT NULL
+);
+SELECT *FROM patient;
+
+
+CREATE TABLE specialty (
+    specialty_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    specialty_name VARCHAR(100) NOT NULL UNIQUE
+);
+
+SELECT *FROM specialty;
+
+CREATE TABLE clinic (
+    clinic_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    clinic_name VARCHAR(100) NOT NULL UNIQUE
+);
+
+SELECT *FROM clinic;
+
+
+CREATE TABLE clinician (
+    clinician_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL,
+    specialty_id INT UNSIGNED NOT NULL,
+
+    CONSTRAINT fk_clinician_specialty
+        FOREIGN KEY (specialty_id)
+        REFERENCES specialty(specialty_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT
+);
+
+SELECT *FROM clinician;
+
+CREATE TABLE appointment (
+    appointment_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    patient_id VARCHAR(10) NOT NULL,
+    clinician_id INT UNSIGNED NOT NULL,
+    clinic_id INT UNSIGNED NOT NULL,
+    appointment_date DATE NOT NULL,
+    appointment_time TIME NOT NULL,
+    notes VARCHAR(255),
+
+    CONSTRAINT fk_appointment_patient
+        FOREIGN KEY (patient_id)
+        REFERENCES patient(patient_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_appointment_clinician
+        FOREIGN KEY (clinician_id)
+        REFERENCES clinician(clinician_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_appointment_clinic
+        FOREIGN KEY (clinic_id)
+        REFERENCES clinic(clinic_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT
+);
+
+SELECT *FROM appointment;
+
+-- BEGIN T06 FIX
+-- For an existing database, run only this block in a fresh connection.
+-- For a new database, run the whole schema file.
+USE crownfield_eye_hospital;
+
+-- An empty result means no existing appointments share a clinician slot.
+SELECT clinician_id, appointment_date, appointment_time, COUNT(*) AS booking_count
+FROM appointment
+GROUP BY clinician_id, appointment_date, appointment_time
+HAVING COUNT(*) > 1;
+
+-- Recognise the exact unique index so this block can be run again.
+SELECT COUNT(*) = 3 AND MAX(non_unique) = 0
+       AND COUNT(sub_part) = 0
+       AND GROUP_CONCAT(column_name ORDER BY seq_in_index) =
+           'clinician_id,appointment_date,appointment_time'
+INTO @t06_slot_key_exists
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'appointment'
+  AND index_name = 'uq_clinician_timeslot';
+
+SET @t06_statement = IF(@t06_slot_key_exists,
+    'SELECT ''Clinician booking constraint already installed'' AS setup_result',
+    'ALTER TABLE appointment ADD CONSTRAINT uq_clinician_timeslot UNIQUE (clinician_id, appointment_date, appointment_time)');
+PREPARE t06_setup FROM @t06_statement;
+EXECUTE t06_setup;
+DEALLOCATE PREPARE t06_setup;
+
+SHOW INDEX FROM appointment WHERE Key_name = 'uq_clinician_timeslot';
+-- END T06 FIX
+
+
+-- Diagnosis TABLE
+
+CREATE TABLE diagnosis (
+    diagnosis_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    diagnosis_name VARCHAR(150) NOT NULL UNIQUE
+);
+
+
+SELECT *FROM diagnosis;
+
+ -- AppointmentDiagnosis table
+CREATE TABLE appointment_diagnosis (
+    appointment_id INT UNSIGNED NOT NULL,
+    diagnosis_id INT UNSIGNED NOT NULL,
+
+    PRIMARY KEY (appointment_id, diagnosis_id),
+
+    CONSTRAINT fk_ad_appointment
+        FOREIGN KEY (appointment_id)
+        REFERENCES appointment(appointment_id)
+        ON DELETE CASCADE,
+
+    CONSTRAINT fk_ad_diagnosis
+        FOREIGN KEY (diagnosis_id)
+        REFERENCES diagnosis(diagnosis_id)
+        ON DELETE RESTRICT
+);
+
+SELECT *FROM appointment_diagnosis;
+
+-- Medicine table
+CREATE TABLE medicine (
+    medicine_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    medicine_name VARCHAR(150) NOT NULL UNIQUE
+);
+
+SELECT *FROM medicine;
+
+-- Prescription table
+CREATE TABLE prescription (
+    prescription_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    appointment_id INT UNSIGNED NOT NULL,
+
+    CONSTRAINT fk_prescription_appointment
+        FOREIGN KEY (appointment_id)
+        REFERENCES appointment(appointment_id)
+        ON DELETE CASCADE
+);
+
+SELECT *FROM prescription;
+
+-- PrescriptionItem table
+CREATE TABLE prescription_item (
+    prescription_id INT UNSIGNED NOT NULL,
+    medicine_id INT UNSIGNED NOT NULL,
+
+    dose VARCHAR(50),
+    route VARCHAR(50),
+    frequency VARCHAR(50),
+    duration_text VARCHAR(50),
+
+    PRIMARY KEY (prescription_id, medicine_id),
+
+    CONSTRAINT fk_pi_prescription
+        FOREIGN KEY (prescription_id)
+        REFERENCES prescription(prescription_id)
+        ON DELETE CASCADE,
+
+    CONSTRAINT fk_pi_medicine
+        FOREIGN KEY (medicine_id)
+        REFERENCES medicine(medicine_id)
+        ON DELETE RESTRICT,
+
+    CONSTRAINT chk_regimen_complete
+        CHECK (
+            (
+                dose IS NULL
+                AND route IS NULL
+                AND frequency IS NULL
+                AND duration_text IS NULL
+            )
+            OR
+            (
+                dose IS NOT NULL
+                AND route IS NOT NULL
+                AND frequency IS NOT NULL
+                AND duration_text IS NOT NULL
+            )
+        )
+);
+
+SELECT *FROM prescription_item;
+
+-- FollowUpPlan table
+CREATE TABLE follow_up_plan (
+    follow_up_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    appointment_id INT UNSIGNED NOT NULL UNIQUE,
+    due_date DATE NOT NULL,
+    priority VARCHAR(20) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'Pending',
+
+    CONSTRAINT fk_followup_appointment
+        FOREIGN KEY (appointment_id)
+        REFERENCES appointment(appointment_id)
+        ON DELETE CASCADE,
+
+    CONSTRAINT chk_followup_priority
+        CHECK (priority IN ('Routine', 'High', 'Urgent')),
+
+    CONSTRAINT chk_followup_status
+        CHECK (status IN ('Pending', 'Scheduled', 'Completed', 'Cancelled'))
+);
+
+SELECT *FROM follow_up_plan;
+
+-- 01b_appendix_data.sql
+
+INSERT INTO patient -- Appendix 1 data migration, Patient data from Appendix
+(patient_id, first_name, last_name, postcode)
+VALUES
+('OP001', 'Amina', 'Yusuf', 'NE1 4AB'),
+('OP002', 'Daniel', 'Reed', 'N16 7QP'),
+('OP003', 'Sofia', 'Bennett', 'E8 2LD'),
+('OP004', 'Michael', 'Okoro', 'SE6 3RT');
+
+SELECT *FROM patient; 
+
+-- Appendix specialties
+INSERT INTO specialty
+(specialty_id, specialty_name)
+VALUES
+(1, 'Glaucoma'),
+(2, 'Retina'),
+(3, 'Cornea');
+
+SELECT *FROM specialty; 
+
+-- Appendix clinicians
+INSERT INTO clinician
+(clinician_id, first_name, last_name, specialty_id)
+VALUES
+(1, 'Maya', 'Shah', 1),
+(2, 'Leo', 'Grant', 2),
+(3, 'Priya', 'Nair', 3);
+
+
+SELECT *FROM clinician; 
+
+-- Appendix clinics
+INSERT INTO clinic
+(clinic_id, clinic_name)
+VALUES
+(1, 'City Road'),
+(2, 'Bedford'),
+(3, 'Croydon');
+
+SELECT *FROM clinic;
+
+-- Appendix appointments
+INSERT INTO appointment
+(
+    appointment_id,
+    patient_id,
+    clinician_id,
+    clinic_id,
+    appointment_date,
+    appointment_time,
+    notes
+)
+VALUES
+(1, 'OP001', 1, 1, '2026-10-05', '09:00:00', 'Review IOP'),
+(2, 'OP002', 2, 1, '2026-10-05', '09:30:00', 'OCT before review'),
+(3, 'OP001', 1, 2, '2026-11-16', '10:15:00', 'Visual field test'),
+(4, 'OP003', 1, 1, '2026-10-06', '11:00:00', 'Monitor'),
+(5, 'OP004', 3, 3, '2026-10-07', '14:00:00', 'Corneal topography');
+
+
+SELECT *FROM appointment;
+
+-- Appendix diagnoses
+INSERT INTO diagnosis
+(diagnosis_id, diagnosis_name)
+VALUES
+(1, 'Ocular hypertension'),
+(2, 'Diabetic macular oedema'),
+(3, 'Glaucoma suspect'),
+(4, 'Keratoconus');
+
+INSERT INTO appointment_diagnosis
+(appointment_id, diagnosis_id)
+VALUES
+(1, 1),
+(2, 2),
+(3, 1),
+(4, 3),
+(5, 4);
+
+SELECT *FROM diagnosis;
+
+
+SELECT *FROM appointment_diagnosis;
+
+-- Appendix medicines
+INSERT INTO medicine
+(medicine_id, medicine_name)
+VALUES
+(1, 'Latanoprost'),
+(2, 'Timolol'),
+(3, 'Aflibercept'),
+(4, 'Sodium chloride drops');
+
+SELECT *FROM medicine;
+
+-- Appendix prescriptions
+INSERT INTO prescription
+(prescription_id, appointment_id)
+VALUES
+(1, 1),
+(2, 2),
+(3, 3),
+(4, 5);
+-- Prescription items:
+INSERT INTO prescription_item
+(
+    prescription_id,
+    medicine_id,
+    dose,
+    route,
+    frequency,
+    duration_text
+)
+VALUES
+(1, 1, NULL, NULL, NULL, NULL),
+(1, 2, NULL, NULL, NULL, NULL),
+(2, 3, NULL, NULL, NULL, NULL),
+(3, 1, NULL, NULL, NULL, NULL),
+(4, 4, NULL, NULL, NULL, NULL);
+
+SELECT *FROM prescription;
+
+SELECT *FROM prescription_item;
+
+-- Appendix follow-ups
+INSERT INTO follow_up_plan
+(
+    follow_up_id,
+    appointment_id,
+    due_date,
+    priority,
+    status
+)
+VALUES
+(1, 1, '2026-11-16', 'High', 'Pending'),
+(2, 2, '2026-11-02', 'Urgent', 'Pending'),
+(3, 3, '2027-02-08', 'Routine', 'Pending'),
+(4, 4, '2027-04-06', 'Routine', 'Pending'),
+(5, 5, '2026-12-02', 'Routine', 'Pending');
+-- Pending is a design default, not an Appendix value.
+
+SELECT *FROM follow_up_plan;
+
+-- Appendix gives follow-up intervals such as:
+-- 6 weeks
+-- 4 weeks
+-- 12 weeks
+-- 26 weeks
+-- 8 weeks
+-- To convert the intervals to dates,the dates were derived from the appointment date, not directly supplied.
+
+-- 01c_synthetic_data.sql
+USE crownfield_eye_hospital;
+
+-- Ten additional fictional patients for database testing.
+INSERT INTO patient
+    (patient_id, first_name, last_name, postcode)
+VALUES
+    ('SY001', 'Sammra', 'Mufti', 'M1 1AR'),
+    ('SY002', 'Adeel', 'Khan', 'M1 1AS'),
+    ('SY003', 'Hannah', 'Alam', 'M1 1AU'),
+    ('SY004', 'Baseer', 'Ahmar', 'M1 1BA'),
+    ('SY005', 'Emily', 'Claire', 'M1 1BE'),
+    ('SY006', 'Noah', 'Elon', 'M1 1ML'),
+    ('SY007', 'Elsa', 'Eben', 'M1 3RK'),
+    ('SY008', 'Umair', 'Hussan', 'M1 1FJ'),
+    ('SY009', 'Molly', 'Bathe', 'M1 4NC'),
+    ('SY010', 'Zimal', 'Aazer', 'M1 2DW');
+
+    SELECT *FROM patient;
+
+    -- Illustrative appointment linked to an existing patient,
+-- clinician and clinic.
+
+USE crownfield_eye_hospital;
+
+-- 1. Sammra Mufti
+INSERT INTO appointment
+    (patient_id, clinician_id, clinic_id,
+     appointment_date, appointment_time, notes)
+VALUES
+    ('SY001', 1, 1,
+     '2026-12-01', '09:00:00', 'Synthetic appointment: eye pressure review');
+
+-- 2. Adeel Khan
+INSERT INTO appointment
+    (patient_id, clinician_id, clinic_id,
+     appointment_date, appointment_time, notes)
+VALUES
+    ('SY002', 2, 2,
+     '2026-12-01', '09:30:00', 'Synthetic appointment: retinal assessment');
+
+-- 3. Hannah Alam
+INSERT INTO appointment
+    (patient_id, clinician_id, clinic_id,
+     appointment_date, appointment_time, notes)
+VALUES
+    ('SY003', 3, 3,
+     '2026-12-01', '10:00:00', 'Synthetic appointment: corneal assessment');
+
+-- 4. Baseer Ahmar
+INSERT INTO appointment
+    (patient_id, clinician_id, clinic_id,
+     appointment_date, appointment_time, notes)
+VALUES
+    ('SY004', 1, 1,
+     '2026-12-01', '10:30:00', 'Synthetic appointment: visual field review');
+
+-- 5. Emily Claire
+INSERT INTO appointment
+    (patient_id, clinician_id, clinic_id,
+     appointment_date, appointment_time, notes)
+VALUES
+    ('SY005', 2, 2,
+     '2026-12-01', '11:00:00', 'Synthetic appointment: retinal imaging review');
+
+-- 6. Noah Elon
+INSERT INTO appointment
+    (patient_id, clinician_id, clinic_id,
+     appointment_date, appointment_time, notes)
+VALUES
+    ('SY006', 3, 3,
+     '2026-12-01', '11:30:00', 'Synthetic appointment: corneal topography review');
+
+-- 7. Elsa Eben
+INSERT INTO appointment
+    (patient_id, clinician_id, clinic_id,
+     appointment_date, appointment_time, notes)
+VALUES
+    ('SY007', 1, 1,
+     '2026-12-02', '09:00:00', 'Synthetic appointment: glaucoma assessment');
+
+-- 8. Umair Hussan
+INSERT INTO appointment
+    (patient_id, clinician_id, clinic_id,
+     appointment_date, appointment_time, notes)
+VALUES
+    ('SY008', 2, 2,
+     '2026-12-02', '09:30:00', 'Synthetic appointment: retinal follow-up review');
+
+-- 9. Molly Bathe
+INSERT INTO appointment
+    (patient_id, clinician_id, clinic_id,
+     appointment_date, appointment_time, notes)
+VALUES
+    ('SY009', 3, 3,
+     '2026-12-02', '10:00:00', 'Synthetic appointment: corneal follow-up review');
+
+-- 10. Zimal Aazer
+INSERT INTO appointment
+    (patient_id, clinician_id, clinic_id,
+     appointment_date, appointment_time, notes)
+VALUES
+    ('SY010', 1, 1,
+     '2026-12-02', '10:30:00', 'Synthetic appointment: eye pressure assessment');
+
+select * from appointment;
+
+-- Confirm there are 10 synthetic patients.
+SELECT COUNT(*) AS synthetic_patient_count
+FROM patient
+WHERE patient_id LIKE 'SY%';
+
+-- Confirm the total includes the original patients.
+SELECT COUNT(*) AS total_patient_count
+FROM patient;
+
+SELECT
+    a.appointment_id,
+    p.patient_id,
+    p.first_name,
+    p.last_name,
+    a.clinician_id,
+    a.clinic_id,
+    a.appointment_date,
+    a.appointment_time,
+    a.notes
+FROM appointment AS a
+INNER JOIN patient AS p
+    ON a.patient_id = p.patient_id
+WHERE p.patient_id IN (
+    'SY001', 'SY002', 'SY003', 'SY004', 'SY005',
+    'SY006', 'SY007', 'SY008', 'SY009', 'SY010'
+)
+ORDER BY p.patient_id, a.appointment_date, a.appointment_time;
+
+USE crownfield_eye_hospital;
+
+INSERT INTO specialty (specialty_name)
+VALUES
+    ('Cataract'),
+    ('Paediatric Ophthalmology'),
+    ('Neuro-ophthalmology'),
+    ('Oculoplastics'),
+    ('Uveitis'),
+    ('Ocular Oncology'),
+    ('Strabismus'),
+    ('Low Vision Rehabilitation'),
+    ('Refractive Surgery'),
+    ('Emergency Ophthalmology');
+
+    SELECT specialty_id, specialty_name
+FROM specialty
+ORDER BY specialty_id;
+
+SELECT COUNT(*) AS total_specialties
+FROM specialty;
+
+-- For clinician table 10 synthetic data entires
+USE crownfield_eye_hospital;
+
+
+INSERT INTO clinician (first_name, last_name, specialty_id)
+VALUES
+    -- SY001: Sammra Mufti — eye pressure review
+    ('Nadia', 'Bashir',
+     (SELECT specialty_id FROM specialty WHERE specialty_name = 'Glaucoma')),
+
+    -- SY002: Adeel Khan — retinal scan and review
+    ('Adam', 'Walsh',
+     (SELECT specialty_id FROM specialty WHERE specialty_name = 'Retina')),
+
+    -- SY003: Hannah Alam — corneal assessment
+    ('Sara', 'Mirza',
+     (SELECT specialty_id FROM specialty WHERE specialty_name = 'Cornea')),
+
+    -- SY004: Baseer Ahmar — visual field test
+    ('Omar', 'Siddiq',
+     (SELECT specialty_id FROM specialty WHERE specialty_name = 'Glaucoma')),
+
+    -- SY005: Emily Claire — review of retinal images
+    ('Helen', 'Foster',
+     (SELECT specialty_id FROM specialty WHERE specialty_name = 'Retina')),
+
+    -- SY006: Noah Elon — glaucoma follow-up
+    ('Imran', 'Aslam',
+     (SELECT specialty_id FROM specialty WHERE specialty_name = 'Glaucoma')),
+
+    -- SY007: Elsa Eben — corneal topography scan
+    ('Alice', 'Morgan',
+     (SELECT specialty_id FROM specialty WHERE specialty_name = 'Cornea')),
+
+    -- SY008: Umair Hussan — retinal follow-up
+    ('Yusuf', 'Raza',
+     (SELECT specialty_id FROM specialty WHERE specialty_name = 'Retina')),
+
+    -- SY009: Molly Bathe — review of visual field results
+    ('Rachel', 'Webb',
+     (SELECT specialty_id FROM specialty WHERE specialty_name = 'Glaucoma')),
+
+    -- SY010: Zimal Aazer — corneal follow-up
+    ('Farah', 'Javed',
+     (SELECT specialty_id FROM specialty WHERE specialty_name = 'Cornea'));
+
+     UPDATE appointment AS a
+JOIN (
+    SELECT 'SY001' AS patient_id, '2026-12-01' AS appt_date,
+           '09:00:00' AS appt_time, 'Nadia' AS first_name, 'Bashir' AS last_name
+    UNION ALL SELECT 'SY002', '2026-12-01', '09:30:00', 'Adam',   'Walsh'
+    UNION ALL SELECT 'SY003', '2026-12-01', '10:00:00', 'Sara',   'Mirza'
+    UNION ALL SELECT 'SY004', '2026-12-01', '10:30:00', 'Omar',   'Siddiq'
+    UNION ALL SELECT 'SY005', '2026-12-01', '11:00:00', 'Helen',  'Foster'
+    UNION ALL SELECT 'SY006', '2026-12-02', '09:00:00', 'Imran',  'Aslam'
+    UNION ALL SELECT 'SY007', '2026-12-02', '09:30:00', 'Alice',  'Morgan'
+    UNION ALL SELECT 'SY008', '2026-12-02', '10:00:00', 'Yusuf',  'Raza'
+    UNION ALL SELECT 'SY009', '2026-12-02', '10:30:00', 'Rachel', 'Webb'
+    UNION ALL SELECT 'SY010', '2026-12-02', '11:00:00', 'Farah',  'Javed'
+) AS booking
+    ON  a.patient_id       = booking.patient_id
+    AND a.appointment_date = booking.appt_date
+    AND a.appointment_time = booking.appt_time
+SET a.clinician_id = (
+    SELECT c.clinician_id
+    FROM clinician AS c
+    WHERE c.first_name = booking.first_name
+      AND c.last_name  = booking.last_name
+);
+
+SELECT
+    p.patient_id,
+    CONCAT(p.first_name, ' ', p.last_name) AS patient_name,
+    CONCAT(c.first_name, ' ', c.last_name) AS clinician_name,
+    s.specialty_name,
+    a.appointment_date,
+    a.notes
+FROM patient AS p
+JOIN appointment AS a ON a.patient_id = p.patient_id
+JOIN clinician AS c   ON c.clinician_id = a.clinician_id
+JOIN specialty AS s   ON s.specialty_id = c.specialty_id
+WHERE p.patient_id BETWEEN 'SY001' AND 'SY010'
+  AND a.appointment_date IN ('2026-12-01', '2026-12-02')
+ORDER BY p.patient_id;
+
+-- clinic TABLE
+USE crownfield_eye_hospital;
+
+INSERT INTO clinic (clinic_name)
+VALUES
+    ('Alder Grove Eye Clinic'),
+    ('Birch Meadow Eye Clinic'),
+    ('Cedar Vale Eye Clinic'),
+    ('Elm Park Eye Clinic'),
+    ('Hazel Brook Eye Clinic'),
+    ('Maple Green Eye Clinic'),
+    ('Oak Field Eye Clinic'),
+    ('Rowan Hill Eye Clinic'),
+    ('Willow Lane Eye Clinic'),
+    ('Yew Gardens Eye Clinic');
+
+    SELECT clinic_id, clinic_name
+FROM crownfield_eye_hospital.clinic
+ORDER BY clinic_id;
+
+USE crownfield_eye_hospital;
+
+-- Add 10 synthetic eye diagnoses.
+INSERT INTO diagnosis (diagnosis_name)
+VALUES
+    ('Primary open-angle glaucoma'),
+    ('Diabetic retinopathy'),
+    ('Corneal abrasion'),
+    ('Normal-tension glaucoma'),
+    ('Epiretinal membrane'),
+    ('Pseudoexfoliative glaucoma'),
+    ('Corneal scarring'),
+    ('Macular hole'),
+    ('Pigmentary glaucoma'),
+    ('Corneal dystrophy');
+
+-- View the results.
+SELECT diagnosis_id, diagnosis_name
+FROM diagnosis
+ORDER BY diagnosis_id;
+
+USE crownfield_eye_hospital;
+
+-- Add 10 synthetic records to the medicine table. Run this INSERT once.
+INSERT INTO medicine (medicine_name)
+VALUES
+    ('Brimonidine'),
+    ('Dorzolamide'),
+    ('Brinzolamide'),
+    ('Travoprost'),
+    ('Bimatoprost'),
+    ('Apraclonidine'),
+    ('Ranibizumab'),
+    ('Dexamethasone'),
+    ('Hypromellose'),
+    ('Carmellose sodium');
+
+-- View all medicines: 14 rows if the 4 Appendix records are already present.
+SELECT medicine_id, medicine_name
+FROM medicine
+ORDER BY medicine_id;
+
+USE crownfield_eye_hospital;
+
+-- Add one prescription for each of the 10 synthetic appointments.
+-- Run this INSERT once, after adding the appointments for SY001 to SY010.
+INSERT INTO prescription (appointment_id)
+SELECT a.appointment_id
+FROM appointment AS a
+WHERE (a.patient_id, a.appointment_date, a.appointment_time) IN (
+    ('SY001', '2026-12-01', '09:00:00'),
+    ('SY002', '2026-12-01', '09:30:00'),
+    ('SY003', '2026-12-01', '10:00:00'),
+    ('SY004', '2026-12-01', '10:30:00'),
+    ('SY005', '2026-12-01', '11:00:00'),
+    ('SY006', '2026-12-02', '09:00:00'),
+    ('SY007', '2026-12-02', '09:30:00'),
+    ('SY008', '2026-12-02', '10:00:00'),
+    ('SY009', '2026-12-02', '10:30:00'),
+    ('SY010', '2026-12-02', '11:00:00')
+)
+AND NOT EXISTS (
+    SELECT 1
+    FROM prescription AS p
+    WHERE p.appointment_id = a.appointment_id
+);
+
+-- View the prescriptions alongside their patient and appointment details.
+SELECT
+    p.prescription_id,
+    a.appointment_id,
+    a.patient_id,
+    CONCAT(pt.first_name, ' ', pt.last_name) AS patient_name,
+    a.appointment_date,
+    a.appointment_time
+FROM prescription AS p
+JOIN appointment AS a ON a.appointment_id = p.appointment_id
+JOIN patient AS pt ON pt.patient_id = a.patient_id
+WHERE a.patient_id BETWEEN 'SY001' AND 'SY010'
+  AND a.appointment_date IN ('2026-12-01', '2026-12-02')
+ORDER BY a.patient_id, a.appointment_time;
+
+USE crownfield_eye_hospital;
+
+SELECT
+    pt.patient_id,
+    a.appointment_id,
+    a.appointment_date,
+    a.appointment_time,
+    p.prescription_id,
+    CASE
+        WHEN a.appointment_id IS NULL THEN 'No appointment on these dates'
+        WHEN p.prescription_id IS NULL THEN 'Appointment found, prescription missing'
+        ELSE 'Prescription found'
+    END AS result
+FROM patient AS pt
+LEFT JOIN appointment AS a
+    ON a.patient_id = pt.patient_id
+   AND a.appointment_date IN ('2026-12-01', '2026-12-02')
+LEFT JOIN prescription AS p
+    ON p.appointment_id = a.appointment_id
+WHERE pt.patient_id BETWEEN 'SY001' AND 'SY010'
+ORDER BY pt.patient_id, a.appointment_time;
+
+INSERT INTO prescription (appointment_id)
+SELECT a.appointment_id
+FROM appointment a
+WHERE (a.patient_id, a.appointment_id) IN (
+    ('SY006', 11),
+    ('SY007', 12),
+    ('SY008', 13),
+    ('SY009', 14),
+    ('SY010', 15)
+)
+AND NOT EXISTS (
+    SELECT 1
+    FROM prescription p
+    WHERE p.appointment_id = a.appointment_id
+);
+COMMIT;
+
+SELECT a.patient_id, a.appointment_id, p.prescription_id
+FROM appointment a
+LEFT JOIN prescription p ON p.appointment_id = a.appointment_id
+WHERE a.appointment_id IN (11, 12, 13, 14, 15)
+ORDER BY a.appointment_id;
+
+SELECT
+    pt.patient_id,
+    pt.first_name,
+    pt.last_name,
+    a.appointment_id,
+    p.prescription_id
+FROM patient pt
+LEFT JOIN appointment a ON a.patient_id = pt.patient_id
+LEFT JOIN prescription p ON p.appointment_id = a.appointment_id
+WHERE pt.patient_id BETWEEN 'SY001' AND 'SY010'
+ORDER BY pt.patient_id, a.appointment_id;
+
+
+-- Follow-up plan
+INSERT INTO follow_up_plan (appointment_id, due_date, priority, status)
+SELECT a.appointment_id, plan_data.due_date, plan_data.priority, plan_data.status
+FROM appointment a
+JOIN (
+    SELECT 'SY001' AS patient_id, 6 AS appointment_id,
+           DATE '2027-01-12' AS due_date, 'Routine' AS priority, 'Pending' AS status
+    UNION ALL SELECT 'SY002',  7, DATE '2026-12-15', 'High',    'Scheduled'
+    UNION ALL SELECT 'SY003',  8, DATE '2026-12-04', 'Urgent',  'Scheduled'
+    UNION ALL SELECT 'SY004',  9, DATE '2027-01-05', 'Routine', 'Pending'
+    UNION ALL SELECT 'SY005', 10, DATE '2027-01-19', 'Routine', 'Pending'
+    UNION ALL SELECT 'SY006', 11, DATE '2026-12-15', 'High',    'Pending'
+    UNION ALL SELECT 'SY007', 12, DATE '2027-01-13', 'Routine', 'Scheduled'
+    UNION ALL SELECT 'SY008', 13, DATE '2026-12-16', 'High',    'Scheduled'
+    UNION ALL SELECT 'SY009', 14, DATE '2027-01-06', 'Routine', 'Pending'
+    UNION ALL SELECT 'SY010', 15, DATE '2027-01-20', 'Routine', 'Pending'
+) plan_data
+    ON a.patient_id = plan_data.patient_id
+   AND a.appointment_id = plan_data.appointment_id
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM follow_up_plan f
+    WHERE f.appointment_id = a.appointment_id
+);
+
+SELECT
+    pt.patient_id,
+    pt.first_name,
+    pt.last_name,
+    a.appointment_id,
+    a.appointment_date,
+    f.follow_up_id,
+    f.due_date,
+    f.priority,
+    f.status
+FROM patient pt
+LEFT JOIN appointment a ON a.patient_id = pt.patient_id
+LEFT JOIN follow_up_plan f ON f.appointment_id = a.appointment_id
+WHERE pt.patient_id BETWEEN 'SY001' AND 'SY010'
+ORDER BY pt.patient_id, a.appointment_id;
+ 
+
+
+-- 01d_tests
+-- Crownfield Eye Hospital | Part B | Shared MySQL 8.0.16+ test file
+-- Run 01_schema.sql, 01b_appendix_data.sql and 01c_synthetic_data.sql first.
+-- Use a fresh connection in MySQL Workbench. Execute the entire file.
+-- Requires permission to create routines and temporary tables. Use InnoDB.
+-- Test rows are rolled back. Generated numeric IDs may have gaps afterwards.
+USE crownfield_eye_hospital;
+
+DROP TEMPORARY TABLE IF EXISTS part_b_log;
+CREATE TEMPORARY TABLE part_b_log (
+    test_id CHAR(3) PRIMARY KEY,
+    lead_name VARCHAR(12),
+    expected_result VARCHAR(120),
+    actual_result VARCHAR(400),
+    verdict VARCHAR(4)
+) ENGINE = MEMORY;  -- Keep the session's evidence after the data rollback.
+
+DROP PROCEDURE IF EXISTS part_b_01d_run_tests;
+DELIMITER $$
+CREATE PROCEDURE part_b_01d_run_tests()
+BEGIN
+    DECLARE n INT DEFAULT 0;
+    DECLARE err INT DEFAULT 0;
+    DECLARE msg VARCHAR(300) DEFAULT '';
+    DECLARE appt, plan_id, doctor, site_id, dx INT UNSIGNED;
+    DECLARE old_status, new_status VARCHAR(20);
+    DECLARE links_before, links_after, parents_after INT;
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    START TRANSACTION;
+
+    -- T01 | Saima | Check the tables built by the schema file.
+    SELECT COUNT(*) INTO n FROM information_schema.tables
+    WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'
+      AND table_name IN ('patient','clinic','specialty','clinician','appointment',
+          'diagnosis','appointment_diagnosis','medicine','prescription',
+          'prescription_item','follow_up_plan');
+    INSERT INTO part_b_log VALUES ('T01','Saima','11 required tables',
+        CONCAT(n,' required tables found'), IF(n=11,'PASS','FAIL'));
+    IF n <> 11 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='T01 failed. Run the complete schema first.';
+    END IF;
+
+    -- Reserve two unused IDs: one valid patient and one missing parent.
+    IF EXISTS (SELECT 1 FROM patient WHERE patient_id IN ('BT_VALID','BT_MISSING')) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Test IDs already exist. Choose two unused IDs in this file.';
+    END IF;
+    SELECT MIN(clinician_id) INTO doctor FROM clinician;
+    SELECT MIN(clinic_id) INTO site_id FROM clinic;
+    SELECT MIN(diagnosis_id) INTO dx FROM diagnosis;
+    IF doctor IS NULL OR site_id IS NULL OR dx IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Load clinician, clinic and diagnosis data first.';
+    END IF;
+    IF EXISTS (SELECT 1 FROM appointment WHERE clinician_id=doctor
+               AND appointment_date='2099-01-15' AND appointment_time IN ('09:00','09:30')) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Test slots already used. Choose another test date throughout.';
+    END IF;
+
+    -- T02 | Saima | Insert one valid patient and read it back.
+    INSERT INTO patient (patient_id, first_name, last_name, postcode)
+    VALUES ('BT_VALID','Test','Patient','M1 1AA');
+    SELECT COUNT(*) INTO n FROM patient WHERE patient_id='BT_VALID';
+    INSERT INTO part_b_log VALUES ('T02','Saima','1 matching patient',
+        CONCAT(n,' matching patient(s)'), IF(n=1,'PASS','FAIL'));
+
+    -- T03 | Saima | Reject duplicate patient ID
+    SAVEPOINT negative_case;
+    SET err=0, msg='Statement accepted';
+    BEGIN
+        DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+            GET DIAGNOSTICS CONDITION 1 err=MYSQL_ERRNO, msg=MESSAGE_TEXT;
+        INSERT INTO patient (patient_id,first_name,last_name,postcode)
+        VALUES ('BT_VALID','Second','Patient','M1 1AB');
+    END;
+    ROLLBACK TO SAVEPOINT negative_case;
+    INSERT INTO part_b_log VALUES ('T03','Saima','Reject duplicate patient ID (error 1062)',
+        CONCAT(err,' | ',msg), IF(err=1062,'PASS','FAIL'));
+
+    -- T04 | Rifat | Reject duplicate specialty name
+    SAVEPOINT negative_case;
+    SET err=0, msg='Statement accepted';
+    BEGIN
+        DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+            GET DIAGNOSTICS CONDITION 1 err=MYSQL_ERRNO, msg=MESSAGE_TEXT;
+        INSERT INTO specialty (specialty_name)
+        SELECT specialty_name FROM specialty ORDER BY specialty_id LIMIT 1;
+    END;
+    ROLLBACK TO SAVEPOINT negative_case;
+    INSERT INTO part_b_log VALUES ('T04','Partner','Reject duplicate specialty name (error 1062)',
+        CONCAT(err,' | ',msg), IF(err=1062,'PASS','FAIL'));
+
+    -- T05 | Rifat | Reject missing patient
+    SAVEPOINT negative_case;
+    SET err=0, msg='Statement accepted';
+    BEGIN
+        DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+            GET DIAGNOSTICS CONDITION 1 err=MYSQL_ERRNO, msg=MESSAGE_TEXT;
+        INSERT INTO appointment (patient_id,clinician_id,clinic_id,appointment_date,appointment_time)
+        VALUES ('BT_MISSING',doctor,site_id,'2099-01-15','09:30');
+    END;
+    ROLLBACK TO SAVEPOINT negative_case;
+    INSERT INTO part_b_log VALUES ('T05','Partner','Reject missing patient (error 1452)',
+        CONCAT(err,' | ',msg), IF(err=1452 AND LOCATE('fk_appointment_patient',msg)>0,'PASS','FAIL'));
+
+    -- Create one valid appointment for the remaining tests.
+    INSERT INTO appointment (patient_id,clinician_id,clinic_id,appointment_date,appointment_time)
+    VALUES ('BT_VALID',doctor,site_id,'2099-01-15','09:00');
+    SET appt=LAST_INSERT_ID();
+
+    -- T06 | Rifat | Reject double-booked clinician
+    SAVEPOINT negative_case;
+    SET err=0, msg='Statement accepted';
+    BEGIN
+        DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+            GET DIAGNOSTICS CONDITION 1 err=MYSQL_ERRNO, msg=MESSAGE_TEXT;
+        INSERT INTO appointment (patient_id,clinician_id,clinic_id,appointment_date,appointment_time)
+        VALUES ('BT_VALID',doctor,site_id,'2099-01-15','09:00');
+    END;
+    ROLLBACK TO SAVEPOINT negative_case;
+    INSERT INTO part_b_log VALUES ('T06','Partner','Reject double-booked clinician (error 1062)',
+        CONCAT(err,' | ',msg), IF(err=1062 AND LOCATE('uq_clinician_timeslot',msg)>0,'PASS','FAIL'));
+
+    -- T07 | Saima | Reject invalid priority Critical
+    SAVEPOINT negative_case;
+    SET err=0, msg='Statement accepted';
+    BEGIN
+        DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+            GET DIAGNOSTICS CONDITION 1 err=MYSQL_ERRNO, msg=MESSAGE_TEXT;
+        INSERT INTO follow_up_plan (appointment_id,due_date,priority)
+        VALUES (appt,'2099-02-15','Critical');
+    END;
+    ROLLBACK TO SAVEPOINT negative_case;
+    INSERT INTO part_b_log VALUES ('T07','Saima','Reject invalid priority Critical (error 3819)',
+        CONCAT(err,' | ',msg), IF(err=3819 AND LOCATE('chk_followup_priority',msg)>0,'PASS','FAIL'));
+
+    -- T08 | Saima | Omit status to test its default, then change one row.
+    INSERT INTO follow_up_plan (appointment_id,due_date,priority)
+    VALUES (appt,'2099-02-15','Routine');
+    SET plan_id=LAST_INSERT_ID();
+    SELECT status INTO old_status FROM follow_up_plan WHERE follow_up_id=plan_id;
+    UPDATE follow_up_plan SET status='Completed' WHERE follow_up_id=plan_id;
+    SET n=ROW_COUNT();
+    SELECT status INTO new_status FROM follow_up_plan WHERE follow_up_id=plan_id;
+    INSERT INTO part_b_log VALUES ('T08','Saima','Pending to Completed, exactly 1 row',
+        CONCAT(old_status,' -> ',new_status,', changed rows = ',n),
+        IF(old_status='Pending' AND new_status='Completed' AND n=1,'PASS','FAIL'));
+
+    -- T09 | Rifat | Delete only the test appointment-diagnosis link.
+    INSERT INTO appointment_diagnosis (appointment_id,diagnosis_id) VALUES (appt,dx);
+    SELECT COUNT(*) INTO links_before FROM appointment_diagnosis
+    WHERE appointment_id=appt AND diagnosis_id=dx;
+    DELETE FROM appointment_diagnosis WHERE appointment_id=appt AND diagnosis_id=dx;
+    SET n=ROW_COUNT();
+    SELECT COUNT(*) INTO links_after FROM appointment_diagnosis
+    WHERE appointment_id=appt AND diagnosis_id=dx;
+    SELECT (SELECT COUNT(*) FROM appointment WHERE appointment_id=appt)
+         + (SELECT COUNT(*) FROM diagnosis WHERE diagnosis_id=dx) INTO parents_after;
+    INSERT INTO part_b_log VALUES ('T09','Partner','Link count 1 to 0, both parents remain',
+        CONCAT('Links ',links_before,' -> ',links_after,', deleted = ',n,', parents = ',parents_after),
+        IF(links_before=1 AND links_after=0 AND n=1 AND parents_after=2,'PASS','FAIL'));
+
+    -- T10 | Rifat | Protect patient with an appointment
+    SAVEPOINT negative_case;
+    SET err=0, msg='Statement accepted';
+    BEGIN
+        DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+            GET DIAGNOSTICS CONDITION 1 err=MYSQL_ERRNO, msg=MESSAGE_TEXT;
+        DELETE FROM patient WHERE patient_id='BT_VALID';
+    END;
+    ROLLBACK TO SAVEPOINT negative_case;
+    INSERT INTO part_b_log VALUES ('T10','Partner','Protect patient with an appointment (error 1451)',
+        CONCAT(err,' | ',msg), IF(err=1451 AND LOCATE('fk_appointment_patient',msg)>0,'PASS','FAIL'));
+
+    ROLLBACK;
+END$$
+DELIMITER ;
+
+CALL part_b_01d_run_tests();
+DROP PROCEDURE part_b_01d_run_tests;
+
+-- Joint evidence: capture this grid, including any FAIL rows.
+SELECT test_id, lead_name, expected_result, actual_result, verdict
+FROM part_b_log ORDER BY test_id;
+-- Check cleanup. Expected: zero.
+SELECT COUNT(*) AS test_patients_remaining FROM patient WHERE patient_id='BT_VALID';
+
+SELECT test_id, verdict, actual_result
+FROM part_b_log
+WHERE test_id = 'T06';
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
